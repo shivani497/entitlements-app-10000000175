@@ -118,25 +118,26 @@ module Entitlements
               filters.reject { |_, filter_val| filter_val == :all }.each do |filter_name, filter_val|
                 filter_cfg = Entitlements::Data::Groups::Calculated.filters_index[filter_name]
                 clazz = filter_cfg.fetch(:class)
-                obj = clazz.new(filter: filter_val, config: filter_cfg.fetch(:config, {}))
+                filter_config = filter_cfg[:config] || {}
+                obj = clazz.new(filter: filter_val, config: filter_config)
                 # If excluded_paths is set, ignore any of those excluded paths
-                unless filter_cfg[:config]["excluded_paths"].nil?
+                unless filter_config["excluded_paths"].nil?
                   # if the filename is not in any of the excluded paths, filter it
-                  unless filter_cfg[:config]["excluded_paths"].any? { |excluded_path| filename.include?(excluded_path) }
+                  unless filter_config["excluded_paths"].any? { |excluded_path| filename.include?(excluded_path) }
                     result.reject! { |member| obj.filtered?(member) }
                   end
                 end
 
                 # if included_paths is set, filter only files at those included paths
-                unless filter_cfg[:config]["included_paths"].nil?
+                unless filter_config["included_paths"].nil?
                   # if the filename is in any of the included paths, filter it
-                  if filter_cfg[:config]["included_paths"].any? { |included_path| filename.include?(included_path) }
+                  if filter_config["included_paths"].any? { |included_path| filename.include?(included_path) }
                     result.reject! { |member| obj.filtered?(member) }
                   end
                 end
 
                 # if neither included_paths nor excluded_paths are set, filter normally
-                if filter_cfg[:config]["included_paths"].nil? and filter_cfg[:config]["excluded_paths"].nil?
+                if filter_config["included_paths"].nil? and filter_config["excluded_paths"].nil?
                   result.reject! { |member| obj.filtered?(member) }
                 end
               end
@@ -242,17 +243,19 @@ module Entitlements
             Entitlements.cache[:dependencies] ||= []
             Entitlements.cache[:dependencies] << "#{rou}/#{cn}"
 
-            # Actually calculate it.
-            Entitlements.cache[:calculated][rou][cn] = _members_from_rules(rule)
-
-            # This should be the last item on the dependencies array, so pop it off.
-            unless Entitlements.cache[:dependencies].last == "#{rou}/#{cn}"
-              # This would be a bug
-              # :nocov:
-              raise "Error: Unexpected last item in dependencies: expected #{rou}/#{cn} got #{Entitlements.cache[:dependencies].inspect}"
-              # :nocov:
+            begin
+              # Only successful evaluations should remain in the calculated cache.
+              Entitlements.cache[:calculated][rou][cn] = _members_from_rules(rule)
+            rescue Exception
+              Entitlements.cache[:calculated][rou].delete(cn)
+              raise
+            ensure
+              # A nested rule may add dependency names before raising; discard this
+              # calculation and its descendants without disturbing its caller.
+              dependencies = Entitlements.cache[:dependencies]
+              index = dependencies.rindex("#{rou}/#{cn}")
+              dependencies.slice!(index..-1) if index
             end
-            Entitlements.cache[:dependencies].pop
 
             # Return the calculated value.
             Entitlements.cache[:calculated][rou][cn]
@@ -340,7 +343,7 @@ module Entitlements
           # Returns C::SetOf[Entitlements::Models::Person] from a recursive call.
           def handle_and(rule)
             ensure_type!("and", rule, Array)
-            return result unless rule.any?
+            return Set.new unless rule.any?
 
             first_rule = rule.shift
             ensure_type!("and", first_rule, Hash)

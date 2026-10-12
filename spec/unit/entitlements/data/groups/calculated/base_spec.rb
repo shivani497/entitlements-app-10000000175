@@ -16,6 +16,20 @@ describe Entitlements::Data::Groups::Calculated::Base do
     let(:obj) { Entitlements::Data::Groups::Calculated::YAML.new(filename: file, config: config) }
     let(:config) { { "base" => "ou=Felines,ou=Groups,dc=kittens,dc=net" } }
 
+    it "applies a filter registered without optional config" do
+      filter_class = Entitlements::Data::Groups::Calculated::Filters::MemberOfGroup
+      Entitlements::Data::Groups::Calculated.register_filter("contractors", class: filter_class)
+      dummy_filter = instance_double(filter_class)
+      expect(filter_class).to receive(:new).with(filter: :all, config: {}).and_return(dummy_filter)
+      # Use an enabled filter so filtered_members constructs it.
+      allow(obj).to receive(:filters).and_return("contractors" => :none)
+      allow(obj).to receive(:members).and_return(Set.new([people_obj.read["blackmanx"]]))
+      expect(filter_class).to receive(:new).with(filter: :none, config: {}).and_return(dummy_filter)
+      expect(dummy_filter).to receive(:filtered?).and_return(true)
+
+      expect(obj.filtered_members).to eq(Set.new)
+    end
+
     it "removes matching members for filters that are enabled" do
       setup_default_filters
       russianblue = people_obj.read["russianblue"]
@@ -135,6 +149,30 @@ describe Entitlements::Data::Groups::Calculated::Base do
 
   describe "#members_from_rules" do
     let(:config) { { "base" => "ou=Felines,ou=Groups,dc=kittens,dc=net" } }
+
+    it "returns an empty set for an empty and rule" do
+      file = fixture("ldap-config/logic_tests/simple_and.yaml")
+      obj = Entitlements::Data::Groups::Calculated::YAML.new(filename: file, config: config)
+
+      expect(obj.send(:members_from_rules, "and" => [])).to eq(Set.new)
+      expect(Entitlements.cache[:dependencies]).to eq([])
+    end
+
+    it "clears calculation state after a rule fails so a later attempt can succeed" do
+      file = fixture("ldap-config/logic_tests/simple_and.yaml")
+      obj = Entitlements::Data::Groups::Calculated::YAML.new(filename: file, config: config)
+      dependency = "#{obj.send(:rou)}/#{obj.send(:cn)}"
+      Entitlements.cache[:dependencies] = ["caller"]
+
+      expect { obj.send(:members_from_rules, "and" => "invalid") }
+        .to raise_error(/expected "and" to be a Array/)
+      expect(Entitlements.cache[:calculated][obj.send(:rou)]).not_to have_key(obj.send(:cn))
+      expect(Entitlements.cache[:dependencies]).to eq(["caller"])
+
+      expect(obj.send(:members_from_rules, "and" => [])).to eq(Set.new)
+      expect(Entitlements.cache[:dependencies]).to eq(["caller"])
+      expect(Entitlements.cache[:dependencies]).not_to include(dependency)
+    end
 
     context "with a complex nested rule set" do
       let(:file) { fixture("ldap-config/logic_tests/nested.yaml") }

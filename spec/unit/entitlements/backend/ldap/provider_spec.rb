@@ -52,6 +52,15 @@ describe Entitlements::Backend::LDAP::Provider do
     let(:dn2) { "cn=russian_blues,#{base}" }
     let(:entry2) { instance_double(Net::LDAP::Entry) }
 
+    it "does not cache an empty OU when the LDAP search fails" do
+      expect(ldap).to receive(:search).twice.and_raise(Entitlements::Service::LDAP::ConnectionError, "Server unavailable")
+
+      2.times do
+        expect { subject.read_all(base) }.to raise_error(Entitlements::Service::LDAP::ConnectionError)
+      end
+      expect(Entitlements.cache[:ldap_cache]).to eq({})
+    end
+
     it "populates the hash from all groups in the directory" do
       allow(ldap).to receive(:search).and_return({dn1 => entry1, dn2 => entry2})
       allow(entry1).to receive(:dn).and_return(dn1)

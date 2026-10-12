@@ -140,7 +140,11 @@ module Entitlements
 
           result[result_key] = entry
         end
-        remember_existing_dn(base) if search_succeeded
+        unless search_succeeded
+          operation_result = ldap.get_operation_result
+          raise ConnectionError, "LDAP search failed for #{base.inspect}: #{operation_result['message']}"
+        end
+        remember_existing_dn(base)
 
         Entitlements.logger.debug "Completed search: #{result.keys.size} result(s)"
 
@@ -267,7 +271,7 @@ module Entitlements
             }
           end
 
-          if @ca_file && ldap_options[:encryption].key?(:tls_options)
+          if @ca_file && ldap_options[:encryption] && ldap_options[:encryption].key?(:tls_options)
             ldap_options[:encryption][:tls_options][:ca_file] = @ca_file
           end
 

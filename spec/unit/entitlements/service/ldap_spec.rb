@@ -81,6 +81,32 @@ describe Entitlements::Service::LDAP do
       end
     end
 
+    context "with a CA specified on a plain LDAP connection" do
+      it "does not add TLS options or raise an error" do
+        plain_ldap = described_class.new(
+          addr: "ldap://ldap.example.net",
+          binddn: "uid=some-user,ou=system-accounts,dc=example,dc=net",
+          bindpw: "passw0rd",
+          ca_file: "/etc/ssl/my-awesome-ca.crt",
+          person_dn_format: person_dn_format
+        )
+        obj = instance_double(Net::LDAP)
+        expect(Net::LDAP).to receive(:new).with(
+          host: "ldap.example.net",
+          port: 389,
+          auth: {
+            method: :simple,
+            username: "uid=some-user,ou=system-accounts,dc=example,dc=net",
+            password: "passw0rd"
+          }
+        ).and_return(obj)
+        expect(obj).to receive(:bind)
+        expect(obj).to receive(:get_operation_result).and_return(OpenStruct.new(code: 0))
+
+        expect(plain_ldap.send(:ldap)).to eq(obj)
+      end
+    end
+
     context "happy path" do
       it "binds, logs, and returns the object" do
         obj = instance_double(Net::LDAP)
@@ -166,6 +192,24 @@ describe Entitlements::Service::LDAP do
   end
 
   describe "#search" do
+    it "raises instead of returning a partial result from a failed search" do
+      allow(subject).to receive(:ldap).and_return(ldap)
+      allow(entry1).to receive(:dn).and_return(dn1)
+      expect(ldap).to receive(:search).and_yield(entry1).and_return(false)
+      expect(ldap).to receive(:get_operation_result).and_return(
+        OpenStruct.new(code: 81, message: "Server unavailable")
+      )
+
+      expect { subject.search(base: dn1) }
+        .to raise_error(described_class::ConnectionError, /Server unavailable/)
+    end
+
+    it "returns an empty hash when a search succeeds without entries" do
+      allow(subject).to receive(:ldap).and_return(ldap)
+      expect(ldap).to receive(:search).and_return(true)
+      expect(subject.search(base: dn1)).to eq({})
+    end
+
     it "raises a duplicate entry error if the same index key is reassigned" do
       filter = Net::LDAP::Filter.eq("manager", "uid=evilbacon,ou=People,dc=example,dc=net")
       expect(subject).to receive(:ldap).and_return(ldap)
@@ -329,27 +373,15 @@ describe Entitlements::Service::LDAP do
       expect(subject.exists?(dn1)).to eq(true)
     end
 
-    it "does not remember the base of a failed search" do
-      expect(subject).to receive(:ldap).twice.and_return(ldap)
-      expect(ldap).to receive(:search)
-        .with(
-          base: dn1,
-          filter: nil,
-          attributes: "*",
-          scope: Net::LDAP::SearchScope_WholeSubtree,
-          return_result: false
-        ).and_return(false)
-      expect(ldap).to receive(:search)
-        .with(
-          base: dn1,
-          filter: nil,
-          attributes: "*",
-          scope: Net::LDAP::SearchScope_BaseObject,
-          return_result: false
-        ).and_return(false)
+    it "does not remember or cache the base of a failed search" do
+      allow(subject).to receive(:ldap).and_return(ldap)
+      expect(ldap).to receive(:search).and_return(false, true)
+      expect(ldap).to receive(:get_operation_result).and_return(
+        OpenStruct.new(code: 81, message: "Server unavailable")
+      )
 
-      expect(subject.search(base: dn1)).to eq({})
-      expect(subject.exists?(dn1)).to eq(false)
+      expect { subject.read(dn1) }.to raise_error(described_class::ConnectionError)
+      expect(subject.read(dn1)).to eq(nil)
     end
   end
 
@@ -378,6 +410,17 @@ describe Entitlements::Service::LDAP do
   describe "#delete" do
     let(:dn) { "cn=kittens,ou=Felines,ou=Groups,dc=example,dc=net" }
     let(:existing) { instance_double(Net::LDAP::Entry) }
+
+    it "does not issue a delete after a failed existence search" do
+      allow(subject).to receive(:ldap).and_return(ldap)
+      expect(ldap).to receive(:search).and_return(false)
+      expect(ldap).to receive(:get_operation_result).and_return(
+        OpenStruct.new(code: 81, message: "Server unavailable")
+      )
+      expect(ldap).not_to receive(:delete)
+
+      expect { subject.delete(dn) }.to raise_error(described_class::ConnectionError)
+    end
 
     it "returns true when the entry did not exist to begin with" do
       expect(subject).not_to receive(:ldap)

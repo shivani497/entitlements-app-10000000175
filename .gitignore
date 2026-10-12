@@ -19,3 +19,5 @@ coverage/*
 .idea
 
 tmp/
+.file_activity_report.json
+.knowledge.kavia
